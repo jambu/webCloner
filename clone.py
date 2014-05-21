@@ -100,6 +100,7 @@ class Cloner(object):
       if is_external_url and not self.external_url: #External URL
         return None
 
+
       self.urls_queue.append(host+path)
       filepath, filename = self._get_local_location(host, path)  
       
@@ -109,7 +110,7 @@ class Cloner(object):
       #for storing external domain urls as well.
       return os.path.join(filepath, filename)
       
-      #If a HTTP server is running in the local, we can avoid absolute file system paths 
+      #If a HTTP server is running in the local, we can avoid absolute file system paths, this can be made as a option as well.
       #return path
 
     if content_type.find('text/html') == 0: #Process HTML file for more links
@@ -227,7 +228,7 @@ if __name__ == '__main__':
   parser.add_argument('-d', '--directory', 
                       help="Directory in which the websites should be cloned. Defaults to current directory.")
   parser.add_argument('-s', '--fetch-static', dest='fetch_static', action='store_true',
-                      help='Download resources which are referenced in css files locally.')
+                      help='Download resources which are referenced in css files and image tags locally.')
   parser.set_defaults(external_url=False)
   parser.set_defaults(fetch_static=False)
 

@@ -1,9 +1,9 @@
-import os, requests
+import os, re
 import argparse
 import html5lib
 from bs4 import BeautifulSoup
 import errno
-import requests
+import requests,tinycss
 from urlparse import urlparse, urljoin
 import logging
 
@@ -13,6 +13,22 @@ console = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console.setFormatter(formatter)
 logger.addHandler(console)
+
+
+def get_urls_from_css_rules(rules):
+  for r in rules:
+    if type(r) == tinycss.css21.MediaRule:
+      for r1 in get_urls_from_css_rules(r.rules):
+        yield r1
+      continue
+    if type(r) == tinycss.css21.ImportRule:
+      yield r.uri
+      continue
+
+    for d in r.declarations:
+      for tok in d.value:
+        if tok.type == 'URI':
+          yield tok.value
 
 class Cloner(object):
   def __init__(self, *args, **kwargs):
@@ -24,6 +40,7 @@ class Cloner(object):
       self.root_dir = os.path.abspath(os.path.join(os.getcwd(), kwargs['directory']))
     self.websites = kwargs['websites']
     self.external_url = kwargs['external_url']
+    self.fetch_static = kwargs['fetch_static']
     self.urls_queue = []
 
   def go(self):
@@ -31,10 +48,15 @@ class Cloner(object):
     for website in self.websites:
       if website.find('http') == -1: #Protocol not added to user input.
         website = '//' + website
+
+      # There may be several redirects causing the program to throw an exception.
+      website = self._get_final_url_after_redirection(website)
+      print website
       self.clone_website(website)
 
   def clone_website(self, website):
     
+
     root_host, root_path = self._get_host_and_path(website)
     root_url = root_host + root_path
     self.urls_queue.append(root_url)
@@ -54,6 +76,9 @@ class Cloner(object):
     if not result: # not a successful http request
       return #cant do much but ignore the page.
 
+    #Important step since redirects will cause the base url to change.
+    page_url = result.url
+
     markup = result.text
     content_type = result.headers['content-type']
 
@@ -68,24 +93,23 @@ class Cloner(object):
 
       host, path = self._get_host_and_path(absolute_url)
       if not host:
+        logger.info('No host for path %s' % path)
         return None
       is_external_url = page_url.find(host) == -1
       if is_external_url and not self.external_url: #External URL
         return None
 
-      filepath, filename = self._get_local_location(host, path)
-      if not os.path.exists(os.path.join(filepath, filename)): # Already processed URL
-        self.urls_queue.append(host+path)
-        
+      self.urls_queue.append(host+path)
+      filepath, filename = self._get_local_location(host, path)  
       
       #This step replaces the url in the page with the standardized url. 
       #Usually static assets are served from a different server to prevent cookie transport for static assets.
       #Since we are storing everything locally, we need to rewrite all the urls and create directory structure
       #for storing external domain urls as well.
-      if is_external_url:
-         return os.path.join(filepath, filename)
-      else:
-         return path
+      return os.path.join(filepath, filename)
+      
+      #If a HTTP server is running in the local, we can avoid absolute file system paths 
+      #return path
 
     if content_type.find('text/html') == 0: #Process HTML file for more links
 
@@ -98,19 +122,44 @@ class Cloner(object):
       for link in htmltree.select('link[href]'):
         adjusted_path = process_link(link['href'])
         if adjusted_path:
-          link['src'] = adjusted_path 
+          link['href'] = adjusted_path 
       for script in htmltree.select('script[src]'):
         adjusted_path = process_link(script['src'])
         if adjusted_path:
-            script['src'] = adjusted_path 
+            script['src'] = adjusted_path
+      if self.fetch_static:
+        for img in htmltree.select('img[src]'):
+          adjusted_path = process_link(img['src'])
+          if adjusted_path:
+            img['src'] = adjusted_path
       markup=unicode(htmltree)
 
+    if self.fetch_static and content_type.find('text/css') == 0: #Process CSS files for more resources to download
+      parser = tinycss.make_parser()
+      rules = parser.parse_stylesheet(markup).rules
+      for url in get_urls_from_css_rules(rules):
+        adjusted_path = process_link(url)
+        if adjusted_path:
+          print 'start'
+          markup = markup.replace(url, adjusted_path)
+          print 'end'
+      # css_without_comments = re.sub(r'(?s)/\*.*\*/', '', markup)
+      # for url in re.findall('url\(([^)]+)\)',css_without_comments):
+      #   adjusted_path = process_link(url)
+      #   if adjusted_path:
+
+    if content_type.startswith('text') or content_type.startswith('application/x-javascript'):
+      file_content = markup.encode('utf-8')
+    else:
+      file_content = result.content
+      print 'I am in'
+    print content_type
     #save the contents of the page locally.
     current_host, current_path = self._get_host_and_path(page_url)
     current_filepath, current_filename = self._get_local_location(current_host, current_path)
     self._create_dir(current_filepath)
     with open(os.path.join(current_filepath, current_filename), 'wb') as webfile:
-      webfile.write(markup.encode('utf-8'))
+      webfile.write(file_content)
 
       
 
@@ -121,6 +170,7 @@ class Cloner(object):
     if path == '/':
       path = '/index.html'
     filepath, filename = os.path.split(os.path.join(self.root_dir, host + path))
+    #logger.info('localpath %s' % os.path.join(filepath, filename))
     return filepath, filename
 
 
@@ -141,17 +191,28 @@ class Cloner(object):
     host = (scheme + '://' + url_obj.hostname) if url_obj.hostname else None
     return host, path
 
-  def _get_page(self, path):
+  def _get_page(self, fullpath):
+
+    host, path = self._get_host_and_path(fullpath)
+
+    filepath, filename = self._get_local_location(host, path)
+    if os.path.exists(os.path.join(filepath, filename)): # Already processed URL
+      logger.info('hit for existing local page %s' % os.path.join(filepath, filename))
+      return None 
 
     #requests library takes care of temporary and permanent redirections
-    logger.info('Download page %s' % path)
-    result = requests.get(path)
+    logger.info('Download page %s' % fullpath)
+    result = requests.get(fullpath)
     if result.status_code == requests.codes.ok:
       return result
     else:
       #log the error and move on.
-      logger.error('Failed to fetch %s: HTTP result code %s' % (path, result.status_code))
+      logger.error('Failed to fetch %s: HTTP result code %s' % (fullpath, result.status_code))
       return None
+
+  def _get_final_url_after_redirection(self, path):
+    print self._get_standard_url(path)
+    return requests.get(self._get_standard_url(path)).url
     
 
   def _create_dir(self, path):
@@ -171,12 +232,15 @@ if __name__ == '__main__':
                       help="Fetch pages which are not in the domain of the website being cloned.")
   parser.add_argument('-d', '--directory', 
                       help="Directory in which the websites should be cloned. Defaults to current directory.")
+  parser.add_argument('-s', '--fetch-static', dest='fetch_static', action='store_true',
+                      help='Download resources which are referenced in css files locally.')
   parser.set_defaults(external_url=False)
+  parser.set_defaults(fetch_static=False)
 
   args=parser.parse_args()
 
   cloner = Cloner(external_url=args.external_url, directory=args.directory,
-   websites=args.website_urls)
+   websites=args.website_urls, fetch_static=args.fetch_static)
   logger.info('Starting Clone Job...')
   cloner.go()
   logger.info('Ending Clone Job....')

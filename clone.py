@@ -51,12 +51,11 @@ class Cloner(object):
 
       # There may be several redirects causing the program to throw an exception.
       website = self._get_final_url_after_redirection(website)
-      print website
+      logger.info('Cloning website %s....' % website)
       self.clone_website(website)
 
   def clone_website(self, website):
     
-
     root_host, root_path = self._get_host_and_path(website)
     root_url = root_host + root_path
     self.urls_queue.append(root_url)
@@ -73,6 +72,7 @@ class Cloner(object):
   def _process_page(self, page_url, no_follow=False):
 
     result = self._get_page(page_url)
+
     if not result: # not a successful http request
       return #cant do much but ignore the page.
 
@@ -80,6 +80,7 @@ class Cloner(object):
     page_url = result.url
 
     markup = result.text
+    file_content = None
     content_type = result.headers['content-type']
 
     def process_link(attr, full_url_needed=False):
@@ -93,7 +94,7 @@ class Cloner(object):
 
       host, path = self._get_host_and_path(absolute_url)
       if not host:
-        logger.info('No host for path %s' % path)
+        logger.warn('No host for path %s. Ignoring Endpoint' % path)
         return None
       is_external_url = page_url.find(host) == -1
       if is_external_url and not self.external_url: #External URL
@@ -132,7 +133,7 @@ class Cloner(object):
           adjusted_path = process_link(img['src'])
           if adjusted_path:
             img['src'] = adjusted_path
-      markup=unicode(htmltree)
+      file_content=unicode(htmltree)
 
     if self.fetch_static and content_type.find('text/css') == 0: #Process CSS files for more resources to download
       parser = tinycss.make_parser()
@@ -140,20 +141,14 @@ class Cloner(object):
       for url in get_urls_from_css_rules(rules):
         adjusted_path = process_link(url)
         if adjusted_path:
-          print 'start'
           markup = markup.replace(url, adjusted_path)
-          print 'end'
-      # css_without_comments = re.sub(r'(?s)/\*.*\*/', '', markup)
-      # for url in re.findall('url\(([^)]+)\)',css_without_comments):
-      #   adjusted_path = process_link(url)
-      #   if adjusted_path:
+      file_content = markup
 
-    if content_type.startswith('text') or content_type.startswith('application/x-javascript'):
-      file_content = markup.encode('utf-8')
+    if file_content:
+      file_content = file_content.encode('utf-8')
     else:
       file_content = result.content
-      print 'I am in'
-    print content_type
+
     #save the contents of the page locally.
     current_host, current_path = self._get_host_and_path(page_url)
     current_filepath, current_filename = self._get_local_location(current_host, current_path)
@@ -201,7 +196,7 @@ class Cloner(object):
       return None 
 
     #requests library takes care of temporary and permanent redirections
-    logger.info('Download page %s' % fullpath)
+    logger.info('Downloading page %s' % fullpath)
     result = requests.get(fullpath)
     if result.status_code == requests.codes.ok:
       return result
@@ -211,7 +206,6 @@ class Cloner(object):
       return None
 
   def _get_final_url_after_redirection(self, path):
-    print self._get_standard_url(path)
     return requests.get(self._get_standard_url(path)).url
     
 
